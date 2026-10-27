@@ -1,67 +1,87 @@
 from __future__ import annotations
 
-from typing import List
+import sqlite3
+from typing import Any, Dict, List, Optional
 
-from app.models import DatabaseSchema, TableSchema
+from sqlalchemy import create_engine, inspect
 
-
-def _table_candidates(schema: DatabaseSchema, task: str) -> List[str]:
-    task_tokens = {token.lower() for token in task.replace("_", " ").split() if len(token) > 2}
-    matches: List[str] = []
-    for table in schema.tables:
-        table_tokens = {token.lower() for token in table.name.replace("_", " ").split() if len(token) > 2}
-        if task_tokens.intersection(table_tokens):
-            matches.append(table.name)
-    if matches:
-        return matches
-    return [table.name for table in schema.tables[:1]]
+from app.models import DatabaseSchema, FieldSchema, TableSchema
 
 
-def _field_candidates(table: TableSchema, task: str) -> List[str]:
-    task_lower = task.lower()
-    hits: List[str] = []
-    for field in table.fields:
-        lowered = field.name.lower()
-        if any(token in task_lower for token in [lowered, lowered.replace("_", " ")]):
-            hits.append(field.name)
-    if hits:
-        return hits
-    return [field.name for field in table.fields[:3]]
+def guess_dialect(database_url: str, dialect: Optional[str] = None) -> str:
+    if dialect:
+        return dialect.lower()
+    url = database_url.lower()
+    if url.startswith("sqlite"):
+        return "sqlite"
+    if url.startswith("postgresql") or url.startswith("postgres"):
+        return "postgres"
+    if url.startswith("mysql"):
+        return "mysql"
+    return "unknown"
 
 
-def _where_clause(table: TableSchema, task: str, dialect: str) -> str:
-    filter_candidates = []
-    for field in table.fields:
-        lname = field.name.lower()
-        if "date" in lname or "time" in lname:
-            if dialect.lower() == "postgres":
-                filter_candidates.append(f"{field.name} >= CURRENT_DATE - INTERVAL '30 days'")
-            elif dialect.lower() == "mysql":
-                filter_candidates.append(f"{field.name} >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)")
-            else:
-                filter_candidates.append(f"{field.name} >= date('now', '-30 days')")
-            break
-        if "status" in lname:
-            filter_candidates.append(f"{field.name} IN ('active', 'confirmed')")
-            break
-    return " AND ".join(filter_candidates) if filter_candidates else "1 = 1"
+def _normalize_sqlalchemy_columns(columns: List[Dict[str, Any]]) -> List[FieldSchema]:
+    result: List[FieldSchema] = []
+    for column in columns:
+        name = str(column.get("name") or column.get("column_name") or "unknown")
+        field_type = str(column.get("type") or column.get("data_type") or "unknown")
+        result.append(FieldSchema(name=name, type=str(field_type)))
+    return result
 
 
-def generate_sql_from_prompt(task: str, schema: DatabaseSchema, dialect: str = "postgres") -> str:
-    if not schema.tables:
-        return "SELECT 1;"
+def _discover_sqlite(database_url: str) -> DatabaseSchema:
+    db_path = database_url.replace("sqlite:///", "").replace("sqlite://", "")
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    tables = cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name;"
+    ).fetchall()
 
-    table_name = _table_candidates(schema, task)[0]
-    table = next((entry for entry in schema.tables if entry.name == table_name), schema.tables[0])
-    fields = _field_candidates(table, task)
-    select_columns = ", ".join(fields[:5]) if fields else "*"
-    where_clause = _where_clause(table, task, dialect)
-
-    if dialect.lower() == "mysql":
-        return f"SELECT {select_columns} FROM `{table_name}` WHERE {where_clause} LIMIT 100;"
-    if dialect.lower() == "sqlite":
-        return f"SELECT {select_columns} FROM \"{table_name}\" WHERE {where_clause} LIMIT 100;"
-    return f"SELECT {select_columns} FROM {table_name} WHERE {where_clause} LIMIT 100;"
+    schema = DatabaseSchema(name="sqlite_db", dialect="sqlite")
+    for (table_name,) in tables:
+        columns = cursor.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+        fields = [FieldSchema(name=str(col[1]), type=str(col[2] or "unknown")) for col in columns]
+        schema.tables.append(TableSchema(name=table_name, fields=fields))
+    conn.close()
+    return schema
 
 
-__all__ = ["generate_sql_from_prompt"]
+def _discover_postgres(database_url: str) -> DatabaseSchema:
+    engine = create_engine(database_url)
+    inspector = inspect(engine)
+    table_names = inspector.get_table_names()
+    db_name = engine.url.database or "postgres_db"
+    schema = DatabaseSchema(name=db_name, dialect="postgres")
+    for table_name in table_names:
+        columns = inspector.get_columns(table_name)
+        schema.tables.append(TableSchema(name=table_name, fields=_normalize_sqlalchemy_columns(columns)))
+    engine.dispose()
+    return schema
+
+
+def _discover_mysql(database_url: str) -> DatabaseSchema:
+    engine = create_engine(database_url)
+    inspector = inspect(engine)
+    table_names = inspector.get_table_names()
+    db_name = engine.url.database or "mysql_db"
+    schema = DatabaseSchema(name=db_name, dialect="mysql")
+    for table_name in table_names:
+        columns = inspector.get_columns(table_name)
+        schema.tables.append(TableSchema(name=table_name, fields=_normalize_sqlalchemy_columns(columns)))
+    engine.dispose()
+    return schema
+
+
+def discover_database_metadata(database_url: str, dialect: Optional[str] = None) -> DatabaseSchema:
+    detected_dialect = guess_dialect(database_url, dialect)
+    if detected_dialect == "sqlite":
+        return _discover_sqlite(database_url)
+    if detected_dialect == "postgres":
+        return _discover_postgres(database_url)
+    if detected_dialect == "mysql":
+        return _discover_mysql(database_url)
+    raise ValueError(f"Unsupported database dialect: {detected_dialect}")
+
+
+__all__ = ["guess_dialect", "discover_database_metadata"]
