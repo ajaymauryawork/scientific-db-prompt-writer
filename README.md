@@ -1,49 +1,212 @@
-import os
-from typing import Any, Dict, Optional
+# Scientific Database Prompt Writer
 
-from fastapi import FastAPI
-from pydantic import BaseModel
+A production-ready Python project that generates scientific database prompts, discovers database metadata, generates SQL, and exposes a REST API for single- and multi-database workflows.
 
-from app.db.discovery import discover_database_metadata
-from app.models import DatabaseSchema, PromptRequest, SchemaDiscoveryRequest, SQLGenerationRequest
-from app.prompting.prompt_writer import generate_prompt, generate_source_mapping
-from app.sql.generator import generate_sql_from_prompt
+## Features
 
-app = FastAPI(title="Scientific Database Prompt Writer", version="1.0.0")
+- Scientific prompt writer for one or many databases
+- Metadata auto-discovery for PostgreSQL, MySQL, and SQLite
+- SQL generation from research questions and schema context
+- Multi-database source mapping and conflict resolution
+- FastAPI web API
+- Docker deployment support
+- Environment-based configuration
+- PostgreSQL seed schema for quick local testing
 
+## Repository layout
 
-class Settings(BaseModel):
-    database_url: Optional[str] = os.getenv("DATABASE_URL")
+```text
+scientific-db-prompt-writer/
+├── app/
+│   ├── __init__.py
+│   ├── main.py
+│   ├── models.py
+│   ├── db/
+│   │   ├── __init__.py
+│   │   └── discovery.py
+│   ├── prompting/
+│   │   ├── __init__.py
+│   │   └── prompt_writer.py
+│   └── sql/
+│       ├── __init__.py
+│       └── generator.py
+├── scripts/
+│   └── seed_postgres.sql
+├── tests/
+│   ├── test_prompt_writer.py
+│   └── test_sql_generator.py
+├── .env.example
+├── .gitignore
+├── Dockerfile
+├── README.md
+├── docker-compose.yml
+├── requirements.txt
+├── run.py
+├── sample_db_config.json
+└── .dockerignore
+```
 
+## Quick start
 
-@app.get("/health")
-def health() -> Dict[str, str]:
-    return {"status": "ok"}
+### 1. Install dependencies
 
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
-@app.post("/api/schema/discover")
-def discover_schema(payload: SchemaDiscoveryRequest) -> Dict[str, Any]:
-    db_url = payload.database_url or Settings().database_url
-    if not db_url:
-        raise ValueError("database_url is required. Set DATABASE_URL or send it in the request body.")
-    schema = discover_database_metadata(db_url, payload.dialect)
-    return {"database": schema.model_dump()}
+### 2. Configure environment
 
+```bash
+cp .env.example .env
+```
 
-@app.post("/api/prompts/generate")
-def generate_prompt_endpoint(payload: PromptRequest) -> Dict[str, Any]:
-    prompt = generate_prompt(payload.task, payload.databases, payload.mode)
-    mapping = generate_source_mapping(payload.databases) if payload.mode == "multi" else None
-    return {"prompt": prompt, "mode": payload.mode, "source_mapping": mapping}
+Example `.env`:
 
+```env
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/appdb
+APP_PORT=8000
+```
 
-@app.post("/api/sql/generate")
-def generate_sql_endpoint(payload: SQLGenerationRequest) -> Dict[str, str]:
-    sql = generate_sql_from_prompt(payload.task, payload.schema, payload.dialect)
-    return {"sql": sql}
+### 3. Start PostgreSQL locally
 
+Using Docker Compose:
 
-if __name__ == "__main__":
-    import uvicorn
+```bash
+docker-compose up -d db
+```
 
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+Seed the sample database:
+
+```bash
+psql postgresql://postgres:postgres@localhost:5432/appdb -f scripts/seed_postgres.sql
+```
+
+### 4. Run the API
+
+```bash
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+### 5. Explore the API
+
+- http://localhost:8000/docs
+- http://localhost:8000/redoc
+
+## Example: generate a prompt
+
+```bash
+curl -X POST "http://localhost:8000/api/prompts/generate" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "task": "Find high-value customers in Europe who purchased more than twice in the last quarter.",
+    "mode": "single",
+    "databases": [{
+      "name": "sales_db",
+      "dialect": "postgres",
+      "tables": [
+        {"name": "customers", "fields": [
+          {"name": "customer_id", "type": "integer"},
+          {"name": "country", "type": "text"},
+          {"name": "signup_date", "type": "date"}
+        ]},
+        {"name": "orders", "fields": [
+          {"name": "order_id", "type": "integer"},
+          {"name": "customer_id", "type": "integer"},
+          {"name": "order_date", "type": "date"},
+          {"name": "amount", "type": "numeric"}
+        ]}
+      ]
+    }]
+  }'
+```
+
+## Example: generate SQL from a prompt
+
+```bash
+curl -X POST "http://localhost:8000/api/sql/generate" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "task": "Show customers with more than three orders and a total spend above $5000.",
+    "dialect": "postgres",
+    "schema": {
+      "name": "sales_db",
+      "dialect": "postgres",
+      "tables": [{
+        "name": "customers",
+        "fields": [{"name": "customer_id", "type": "integer"}, {"name": "country", "type": "text"}]
+      }, {
+        "name": "orders",
+        "fields": [{"name": "order_id", "type": "integer"}, {"name": "customer_id", "type": "integer"}, {"name": "amount", "type": "numeric"}]
+      }]
+    }
+  }'
+```
+
+## Example: discover metadata from a real PostgreSQL database
+
+```bash
+curl -X POST "http://localhost:8000/api/schema/discover" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "sales_db",
+    "database_url": "postgresql://postgres:postgres@localhost:5432/appdb",
+    "dialect": "postgres"
+  }'
+```
+
+If you set `DATABASE_URL` in your environment, you can omit `database_url` from the request body.
+
+## Seed database schema
+
+The project includes a ready-to-use PostgreSQL seed file at `scripts/seed_postgres.sql`.
+
+It creates:
+- `customers`
+- `products`
+- `orders`
+
+and inserts a small dataset for local prompt generation and SQL testing.
+
+## Docker
+
+Build and run with Docker Compose:
+
+```bash
+docker-compose up --build
+```
+
+Or build directly:
+
+```bash
+docker build -t scientific-db-prompt-writer .
+docker run -p 8000:8000 --env DATABASE_URL=postgresql://postgres:postgres@host.docker.internal:5432/appdb scientific-db-prompt-writer
+```
+
+## Multi-database source mapping
+
+For multi-database mode, the project computes:
+
+- shared entities across databases
+- field overlap mappings
+- likely join/merge candidates
+- conflict resolution suggestions
+
+## Scientific prompt structure
+
+The generated prompt includes:
+
+- objective
+- relevant schema
+- scientific method
+- search strategy
+- constraints
+- output requirements
+- validation and quality-control guidance
+
+## Testing
+
+```bash
+pytest -q
+```
