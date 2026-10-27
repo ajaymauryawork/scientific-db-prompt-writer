@@ -2,6 +2,21 @@
 
 A production-ready Python project that generates scientific database prompts, discovers database metadata, generates SQL, and exposes a REST API for single- and multi-database workflows.
 
+## Support and Contributions
+
+If you would like to support this project, you can contribute via the UPI QR code below.
+
+Save the QR image file as `docs/upi-qr.png` and then use the following snippet in this README:
+
+```md
+![UPI QR for AJAY MAURYA](docs/upi-qr.png)
+
+UPI ID: `8114286022@upi`
+Name: `AJAY MAURYA`
+```
+
+This allows users who want to contribute small amounts to easily scan the QR code and support the project.
+
 ## Features
 
 - Scientific prompt writer for one or many databases
