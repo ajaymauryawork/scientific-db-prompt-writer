@@ -1,64 +1,67 @@
-import re
+from __future__ import annotations
+
+from typing import List
+
+from app.models import DatabaseSchema, TableSchema
 
 
-def _normalize_name(value: str) -> str:
-    return re.sub(r'[^a-z0-9_]+', '_', value.lower()).strip('_')
-
-
-def _table_candidates(schema: dict, task: str) -> list[str]:
-    task_tokens = set(_normalize_name(token) for token in task.lower().split())
-    matches = []
-    for table in schema.get("tables", []):
-        t_name = _normalize_name(table.get("name", ""))
-        table_tokens = set(_normalize_name(token) for token in t_name.split('_'))
+def _table_candidates(schema: DatabaseSchema, task: str) -> List[str]:
+    task_tokens = {token.lower() for token in task.replace("_", " ").split() if len(token) > 2}
+    matches: List[str] = []
+    for table in schema.tables:
+        table_tokens = {token.lower() for token in table.name.replace("_", " ").split() if len(token) > 2}
         if task_tokens.intersection(table_tokens):
-            matches.append(table.get("name"))
+            matches.append(table.name)
     if matches:
         return matches
-    return [table.get("name") for table in schema.get("tables", [])[:1] if table.get("name")]
+    return [table.name for table in schema.tables[:1]]
 
 
-def _field_candidates(table: dict, task: str) -> list[str]:
+def _field_candidates(table: TableSchema, task: str) -> List[str]:
     task_lower = task.lower()
-    fields = []
-    for field in table.get("fields", []):
-        name = field.get("name", "")
-        if any(keyword in task_lower for keyword in [name.lower(), name.lower().replace('_', ' ')]):
-            fields.append(name)
-    return fields or [f.get("name") for f in table.get("fields", [])[:3] if f.get("name")]
+    hits: List[str] = []
+    for field in table.fields:
+        lowered = field.name.lower()
+        if any(token in task_lower for token in [lowered, lowered.replace("_", " ")]):
+            hits.append(field.name)
+    if hits:
+        return hits
+    return [field.name for field in table.fields[:3]]
 
 
-def _build_where_clause(task: str, table: dict) -> str:
-    lower = task.lower()
-    filters = []
-    field_names = [f.get("name", "") for f in table.get("fields", [])]
-    for field in field_names:
-        lname = field.lower()
+def _where_clause(table: TableSchema, task: str, dialect: str) -> str:
+    filter_candidates = []
+    for field in table.fields:
+        lname = field.name.lower()
         if "date" in lname or "time" in lname:
-            filters.append(f"{field} >= CURRENT_DATE - INTERVAL '30 days'")
+            if dialect.lower() == "postgres":
+                filter_candidates.append(f"{field.name} >= CURRENT_DATE - INTERVAL '30 days'")
+            elif dialect.lower() == "mysql":
+                filter_candidates.append(f"{field.name} >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)")
+            else:
+                filter_candidates.append(f"{field.name} >= date('now', '-30 days')")
             break
         if "status" in lname:
-            filters.append(f"{field} IN ('active', 'confirmed')")
+            filter_candidates.append(f"{field.name} IN ('active', 'confirmed')")
             break
-    if not filters:
-        filters.append("1 = 1")
-    return " AND ".join(filters)
+    return " AND ".join(filter_candidates) if filter_candidates else "1 = 1"
 
 
-def generate_sql_from_prompt(task: str, schema: dict, dialect: str = "postgres") -> str:
-    tables = schema.get("tables", [])
-    if not tables:
+def generate_sql_from_prompt(task: str, schema: DatabaseSchema, dialect: str = "postgres") -> str:
+    if not schema.tables:
         return "SELECT 1;"
 
-    primary_table = _table_candidates(schema, task)[0]
-    table_obj = next((table for table in tables if table.get("name") == primary_table), tables[0])
-
-    fields = _field_candidates(table_obj, task)
+    table_name = _table_candidates(schema, task)[0]
+    table = next((entry for entry in schema.tables if entry.name == table_name), schema.tables[0])
+    fields = _field_candidates(table, task)
     select_columns = ", ".join(fields[:5]) if fields else "*"
-    where_clause = _build_where_clause(task, table_obj)
+    where_clause = _where_clause(table, task, dialect)
 
     if dialect.lower() == "mysql":
-        return f"SELECT {select_columns} FROM {primary_table} WHERE {where_clause} LIMIT 100;"
+        return f"SELECT {select_columns} FROM `{table_name}` WHERE {where_clause} LIMIT 100;"
     if dialect.lower() == "sqlite":
-        return f"SELECT {select_columns} FROM \"{primary_table}\" WHERE {where_clause} LIMIT 100;"
-    return f"SELECT {select_columns} FROM {primary_table} WHERE {where_clause} LIMIT 100;"
+        return f"SELECT {select_columns} FROM \"{table_name}\" WHERE {where_clause} LIMIT 100;"
+    return f"SELECT {select_columns} FROM {table_name} WHERE {where_clause} LIMIT 100;"
+
+
+__all__ = ["generate_sql_from_prompt"]
